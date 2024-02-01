@@ -13,7 +13,7 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Demo
         private const string ActivitySourceName = "MyCompany.MyProduct.MyLibrary";
         private static readonly ActivitySource s_activitySource = new(ActivitySourceName);
 
-        private const string ConnectionString = "InstrumentationKey=00000000-0000-0000-0000-000000000000";
+        private const string ConnectionString = "InstrumentationKey=9fec9365-beed-483b-9309-a888347d817d;IngestionEndpoint=https://westus2-2.in.applicationinsights.azure.com/;LiveEndpoint=https://westus2.livediagnostics.monitor.azure.com/";
 
         private static Random _random = new();
 
