@@ -61,7 +61,7 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals.Filtering
             // create document streams based on description in info
             this.CreateDocumentStreams(out CollectionConfigurationError[] documentStreamErrors, previousDocumentStreams ?? Array.Empty<DocumentStream>());
 
-            errors = metricErrors.ToArray();
+            errors = metricErrors.Concat(documentStreamErrors).ToArray();
 
             foreach (var error in errors)
             {

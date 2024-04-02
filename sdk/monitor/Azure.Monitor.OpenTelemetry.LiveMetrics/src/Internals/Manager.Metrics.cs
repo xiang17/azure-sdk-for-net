@@ -26,32 +26,6 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
         private DateTimeOffset _cachedCollectedTime = DateTimeOffset.MinValue;
         private long _cachedCollectedValue = 0;
 
-        private const float MaxGlobalTelemetryQuota = 30f * 10f;
-
-        private const float InitialGlobalTelemetryQuota = 3f * 10f;
-
-        /// <summary>
-        /// An overall, cross-stream quota tracker.
-        /// </summary>
-        private QuickPulseQuotaTracker globalQuotaTracker;
-
-        private void UpdateGlobalQuotas(QuotaConfigurationInfo quotaInfo)
-        {
-            if (quotaInfo != null)
-            {
-                globalQuotaTracker = new QuickPulseQuotaTracker(
-                    quotaInfo.MaxQuota,
-                    quotaInfo.InitialQuota ?? InitialGlobalTelemetryQuota,
-                    quotaInfo.QuotaAccrualRatePerSec);
-            }
-            else
-            {
-                globalQuotaTracker = new QuickPulseQuotaTracker(
-                    MaxGlobalTelemetryQuota,
-                    InitialGlobalTelemetryQuota);
-            }
-        }
-
         public MonitoringDataPoint GetDataPoint()
         {
             var dataPoint = new MonitoringDataPoint
@@ -392,9 +366,6 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
             if (interested)
             {
                 telemetryDocument = convertTelemetryToTelemetryDocument(telemetry, matchingDocumentStreamIds);
-
-                // this document will count as 1 towards the global quota regardless of number of streams that are interested in it
-                telemetryDocument = this.globalQuotaTracker.ApplyQuota() ? telemetryDocument : null;
             }
 
             return telemetryDocument;

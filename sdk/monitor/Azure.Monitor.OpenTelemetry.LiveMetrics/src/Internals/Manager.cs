@@ -37,10 +37,6 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
 
                 InitializeState();
             }
-
-            globalQuotaTracker = new QuickPulseQuotaTracker(
-                MaxGlobalTelemetryQuota,
-                InitialGlobalTelemetryQuota);
         }
 
         public LiveMetricsResource? LiveMetricsResource { get; set; }
