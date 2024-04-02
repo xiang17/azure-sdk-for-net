@@ -26,6 +26,32 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
         private DateTimeOffset _cachedCollectedTime = DateTimeOffset.MinValue;
         private long _cachedCollectedValue = 0;
 
+        private const float MaxGlobalTelemetryQuota = 30f * 10f;
+
+        private const float InitialGlobalTelemetryQuota = 3f * 10f;
+
+        /// <summary>
+        /// An overall, cross-stream quota tracker.
+        /// </summary>
+        private QuickPulseQuotaTracker globalQuotaTracker;
+
+        private void UpdateGlobalQuotas(QuotaConfigurationInfo quotaInfo)
+        {
+            if (quotaInfo != null)
+            {
+                globalQuotaTracker = new QuickPulseQuotaTracker(
+                    quotaInfo.MaxQuota,
+                    quotaInfo.InitialQuota ?? InitialGlobalTelemetryQuota,
+                    quotaInfo.QuotaAccrualRatePerSec);
+            }
+            else
+            {
+                globalQuotaTracker = new QuickPulseQuotaTracker(
+                    MaxGlobalTelemetryQuota,
+                    InitialGlobalTelemetryQuota);
+            }
+        }
+
         public MonitoringDataPoint GetDataPoint()
         {
             var dataPoint = new MonitoringDataPoint
@@ -52,14 +78,22 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
             Dictionary<string, AccumulatedValues> metricAccumulators = CreateMetricAccumulators(_collectionConfiguration);
             LiveMetricsBuffer liveMetricsBuffer = new();
             DocumentBuffer filledBuffer = _documentBuffer.FlipDocumentBuffers();
+            IEnumerable<DocumentStream> documentStreams = _collectionConfiguration.DocumentStreams;
             foreach (var item in filledBuffer.ReadAllAndClear())
             {
                 // TODO: item.DocumentStreamIds = new List<string> { "" }; - Will add the identifier for the specific filtering rules (if applicable). See also "matchingDocumentStreamIds" in AI SDK.
 
-                dataPoint.Documents.Add(item);
+                DocumentIngress? telemetryDocument = null;
+
+                CollectionConfigurationError[] groupErrors;
 
                 if (item is Request request)
                 {
+                    telemetryDocument = CreateTelemetryDocument(request,
+                        documentStreams,
+                        documentStream => documentStream.RequestQuotaTracker,
+                        documentStream => documentStream.CheckFilters(request, out groupErrors),
+                        CreateUpdatedRequest);
                     ApplyFilters(metricAccumulators, _collectionConfiguration.RequestMetrics, request, out filteringErrors, ref projectionError);
                     if (item.Extension_IsSuccess)
                     {
@@ -72,6 +106,11 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
                 }
                 else if (item is RemoteDependency remoteDependency)
                 {
+                    telemetryDocument = CreateTelemetryDocument(remoteDependency,
+                        documentStreams,
+                        documentStream => documentStream.DependencyQuotaTracker,
+                        documentStream => documentStream.CheckFilters(remoteDependency, out groupErrors),
+                        CreateUpdatedRemoteDependency);
                     ApplyFilters(metricAccumulators, _collectionConfiguration.DependencyMetrics, remoteDependency, out filteringErrors, ref projectionError);
                     if (item.Extension_IsSuccess)
                     {
@@ -84,16 +123,31 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
                 }
                 else if (item is Models.Exception exception)
                 {
+                    telemetryDocument = CreateTelemetryDocument(exception,
+                        documentStreams,
+                        documentStream => documentStream.ExceptionQuotaTracker,
+                        documentStream => documentStream.CheckFilters(exception, out groupErrors),
+                        CreateUpdatedException);
                     ApplyFilters(metricAccumulators, _collectionConfiguration.ExceptionMetrics, exception, out filteringErrors, ref projectionError);
                     liveMetricsBuffer.RecordException();
                 }
                 else if (item is Models.Trace trace)
                 {
+                    telemetryDocument = CreateTelemetryDocument(trace,
+                        documentStreams,
+                        documentStream => documentStream.TraceQuotaTracker,
+                        documentStream => documentStream.CheckFilters(trace, out groupErrors),
+                        CreateUpdatedTrace);
                     ApplyFilters(metricAccumulators, _collectionConfiguration.TraceMetrics, trace, out filteringErrors, ref projectionError);
                 }
                 else
                 {
                     Debug.WriteLine($"Unknown DocumentType: {item.DocumentType}");
+                }
+
+                if (telemetryDocument != null)
+                {
+                    dataPoint.Documents.Add(telemetryDocument);
                 }
             }
 
@@ -113,6 +167,26 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
             }
 
             return dataPoint;
+        }
+
+        private Request CreateUpdatedRequest(Request request, IList<string> documentStreamIds)
+        {
+            return new Request(request.DocumentType, documentStreamIds, request.Properties, request.Name, request.Url, request.ResponseCode, request.Duration);
+        }
+
+        private RemoteDependency CreateUpdatedRemoteDependency(RemoteDependency remoteDependency, IList<string> documentStreamIds)
+        {
+            return new RemoteDependency(remoteDependency.DocumentType, documentStreamIds, remoteDependency.Properties, remoteDependency.Name, remoteDependency.CommandName, remoteDependency.ResultCode, remoteDependency.Duration);
+        }
+
+        private Models.Exception CreateUpdatedException(Models.Exception exception, IList<string> documentStreamIds)
+        {
+            return new Models.Exception(exception.DocumentType, documentStreamIds, exception.Properties, exception.ExceptionType, exception.ExceptionMessage);
+        }
+
+        private Models.Trace CreateUpdatedTrace(Models.Trace trace, IList<string> documentStreamIds)
+        {
+            return new Models.Trace(trace.DocumentType, documentStreamIds, trace.Properties, trace.Message);
         }
 
         /// <remarks>
@@ -290,6 +364,40 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals
                 processorCount: _processorCount,
                 normalizedValue: normalizedValue);
             return true;
+        }
+
+        private DocumentIngress? CreateTelemetryDocument<TTelemetry>(
+            TTelemetry telemetry,
+            IEnumerable<DocumentStream> documentStreams,
+            Func<DocumentStream, QuickPulseQuotaTracker> getQuotaTracker,
+            Func<DocumentStream, bool> checkDocumentStreamFilters,
+            Func<TTelemetry, IList<string>, DocumentIngress> convertTelemetryToTelemetryDocument)
+        {
+            // check which document streams are interested in this telemetry
+            var interested = false;
+            DocumentIngress? telemetryDocument = null;
+            var matchingDocumentStreamIds = new ChangeTrackingList<string>();
+
+            foreach (DocumentStream matchingDocumentStream in documentStreams.Where(checkDocumentStreamFilters))
+            {
+                // for each interested document stream only let the document through if there's quota available for that stream
+                if (getQuotaTracker(matchingDocumentStream).ApplyQuota())
+                {
+                    interested = true;
+
+                    matchingDocumentStreamIds.Add(matchingDocumentStream.Id);
+                }
+            }
+
+            if (interested)
+            {
+                telemetryDocument = convertTelemetryToTelemetryDocument(telemetry, matchingDocumentStreamIds);
+
+                // this document will count as 1 towards the global quota regardless of number of streams that are interested in it
+                telemetryDocument = this.globalQuotaTracker.ApplyQuota() ? telemetryDocument : null;
+            }
+
+            return telemetryDocument;
         }
     }
 }
