@@ -63,23 +63,36 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals.Filtering
 
             errors = metricErrors.Concat(documentStreamErrors).ToArray();
 
-            foreach (var error in errors)
+            UpdateAllErrorsWithKeyValue(errors, "ETag", this.info.Etag);
+        }
+
+        private void UpdateAllErrorsWithKeyValue(CollectionConfigurationError[] errors, string key, string value)
+        {
+            for (int i = 0; i < errors.Length; i++)
             {
-                UpdateOrAddKeyValueList(error, "ETag", this.info.Etag);
+                var newError = UpdateOrCreateError(errors[i], key, value);
+                if (newError != null)
+                {
+                    errors[i] = newError;
+                }
             }
         }
 
-        private void UpdateOrAddKeyValueList(CollectionConfigurationError error, string key, string value)
+        private CollectionConfigurationError? UpdateOrCreateError(CollectionConfigurationError error, string key, string value)
         {
             for (int i = 0; i < error.Data.Count; i++)
             {
                 if (error.Data[i].Key == key)
                 {
                     error.Data[i].Value = value;
-                    return;
+                    return null;
                 }
             }
-            error.Data.Add(new KeyValuePairString(key, value));
+            var newData = new List<KeyValuePairString>(error.Data)
+            {
+                new KeyValuePairString(key, value)
+            };
+            return new CollectionConfigurationError(error.CollectionConfigurationErrorType, error.Message, error.FullException, newData);
         }
 
         public IEnumerable<DerivedMetric<Request>> RequestMetrics => this.requestDocumentIngressMetrics;
@@ -205,10 +218,7 @@ namespace Azure.Monitor.OpenTelemetry.LiveMetrics.Internals.Filtering
 
                     if (localErrors != null)
                     {
-                        foreach (var error in localErrors)
-                        {
-                            UpdateOrAddKeyValueList(error, "DocumentStreamId", documentStreamInfo.Id);
-                        }
+                        UpdateAllErrorsWithKeyValue(localErrors, "DocumentStreamId", documentStreamInfo.Id);
 
                         errorList.AddRange(localErrors);
                     }
